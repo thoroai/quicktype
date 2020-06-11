@@ -1,0 +1,188 @@
+---
+# Reusable YAML Anchors
+# ============
+
+yaml_anchors:
+  tags: &tags [ ]
+
+  slack_channel: &notifier "#devops_aws"
+
+  job_defaults: &job-defaults
+    on_failure: &job-failed
+      put: *notifier
+      tags: *tags
+      params:
+        mode: &notify-mode concise
+        alert_type: failed
+
+    on_abort: &job-aborted
+      put: *notifier
+      tags: *tags
+      params:
+        mode: *notify-mode
+        alert_type: aborted
+
+    on_error: *job-failed
+
+    build_log_retention: &build-log-retention
+      builds: 10
+      minimum_succeeded_builds: 2
+
+  build: &build
+    task: build
+    file: quicktype/ci/tasks/build.yml
+    privileged: true
+    tags: *tags
+    input_mapping:
+      repo: quicktype
+    output_mapping:
+      image: quicktype-image
+    params:
+      CONTEXT: repo
+
+  get_tag: &get-tag
+    task: get-tag
+    file: tagged-quicktype/ci/tasks/get-tag.yml
+    tags: *tags
+    input_mapping:
+      repo: tagged-quicktype
+    output_mapping:
+      tag: tag
+
+# Pipeline Jobs
+# =============
+
+jobs:
+  # AWS Deployer
+  - name: waterfall
+    <<: *job-defaults
+
+    plan:
+      - get: quicktype
+        trigger: true
+        tags: *tags
+
+      - *build
+
+  - name: quicktype-pr-waterfall
+    <<: *job-defaults
+
+    plan:
+      - get: quicktype
+        resource: quicktype-pull-request
+        tags: *tags
+        trigger: true
+        version: every
+
+      - &put-pr-check-quicktype
+        put: update-status
+        resource: quicktype-pull-request
+        tags: *tags
+        params:
+          path: quicktype
+          status: pending
+
+      - <<: *build
+        on_failure:
+          <<: *put-pr-check-quicktype
+          params:
+            path: quicktype
+            status: failure
+
+      - <<: *put-pr-check-quicktype
+        params:
+          path: quicktype
+          status: success
+
+  - name: release
+    <<: *job-defaults
+
+    plan:
+      - get: tagged-quicktype
+        trigger: true
+        tags: *tags
+
+      - <<: *build
+        file: tagged-quicktype/ci/tasks/build.yml
+        input_mapping:
+          repo: tagged-quicktype
+
+      - *get-tag
+
+      - put: quicktype-image
+        params:
+          additional_tags: tag/tagsfile
+          image: image/image.tar
+
+
+# Pipeline Resources
+# ==================
+
+resource_types:
+  - name: pull-request
+    type: docker-image
+    tags: *tags
+    source:
+      repository: teliaoss/github-pr-resource
+
+  - name: slack-notifier
+    type: registry-image
+    tags: *tags
+    source: {repository: mockersf/concourse-slack-notifier}
+
+
+resources:
+
+  # Project repos
+  # -------------
+
+  - name: quicktype
+    type: git
+    icon: git
+    tags: *tags
+    source:
+      uri: git@github.com:thoroai/quicktype.git
+      branch: ci
+      private_key: ((quicktype-deploy-key))
+
+  - name: tagged-quicktype
+    type: git
+    icon: git
+    tags: *tags
+    source:
+      uri: git@github.com:thoroai/quicktype.git
+      branch: ci
+      tag_filter: "*"
+      private_key: ((quicktype-deploy-key))
+
+  # Artifact storage
+  # ----------------
+
+  - name: quicktype-image
+    type: registry-image
+    source:
+      repository: crl-docker.jfrog.io/carnegierobotics/quicktype
+      username: ((writer-artifactory-user))
+      password: ((writer-artifactory-token))
+
+  # Notifications
+  # -------------
+
+  - name: *notifier
+    icon: slack
+    type: slack-notifier
+    tags: *tags
+    source:
+      url: ((slack_webhook_url_devops_aws))
+      disabled: true
+
+  - name: quicktype-pull-request
+    type: pull-request
+    icon: source-pull
+    tags: *tags
+    check_every: 10m
+    # webhook_token: ((webhook_token))
+    source:
+      repository: thoroai/quicktype
+      base_branch: ci
+      access_token: ((thoroai-access-token))

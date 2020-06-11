@@ -1,0 +1,23 @@
+---
+platform: linux
+
+image_resource:
+  type: registry-image
+  source:
+    repository: alpine/git
+
+inputs:
+  - name: repo
+
+outputs:
+  - name: tag
+
+run:
+  path: sh
+  args:
+    - -exc
+    - |
+      TAG=`git -C repo describe --abbrev=0 --tags`
+      SHA=`git -C repo rev-parse --short HEAD`
+      echo "$TAG $SHA" >> tag/tagsfile
+      cat tag/tagsfile
